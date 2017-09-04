@@ -16,53 +16,27 @@
 
 package compiler
 
-import api.ParameterExtension
-
-import org.jetbrains.kotlin.analyzer.ModuleInfo
-
 import org.jetbrains.kotlin.cli.common.CLIConfigurationKeys
-import org.jetbrains.kotlin.cli.common.messages.CompilerMessageLocation
-import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
-import org.jetbrains.kotlin.cli.common.messages.MessageCollector
-import org.jetbrains.kotlin.cli.common.messages.MessageUtil
-import org.jetbrains.kotlin.cli.common.messages.OutputMessageUtil
+import org.jetbrains.kotlin.cli.common.messages.*
 import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinToJVMBytecodeCompiler.compileScript
 import org.jetbrains.kotlin.cli.jvm.config.addJvmClasspathRoots
-
 import org.jetbrains.kotlin.codegen.CompilationException
-
 import org.jetbrains.kotlin.com.intellij.openapi.Disposable
 import org.jetbrains.kotlin.com.intellij.openapi.util.Disposer.dispose
 import org.jetbrains.kotlin.com.intellij.openapi.util.Disposer.newDisposable
-
 import org.jetbrains.kotlin.config.CommonConfigurationKeys
 import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.config.JVMConfigurationKeys
 import org.jetbrains.kotlin.config.JVMConfigurationKeys.OUTPUT_DIRECTORY
 import org.jetbrains.kotlin.config.JVMConfigurationKeys.RETAIN_OUTPUT_IN_MEMORY
 import org.jetbrains.kotlin.config.addKotlinSourceRoots
-
-import org.jetbrains.kotlin.container.ComponentProvider
-import org.jetbrains.kotlin.container.get
-
-import org.jetbrains.kotlin.descriptors.ClassDescriptor
-import org.jetbrains.kotlin.descriptors.FunctionDescriptor
-
-import org.jetbrains.kotlin.extensions.AnnotationBasedExtension
 import org.jetbrains.kotlin.extensions.StorageComponentContainerContributor
-
-import org.jetbrains.kotlin.load.java.sam.SamWithReceiverResolver
-
-import org.jetbrains.kotlin.psi.KtModifierListOwner
-
+import org.jetbrains.kotlin.samWithReceiver.CliSamWithReceiverComponentContributor
 import org.jetbrains.kotlin.script.KotlinScriptDefinition
-
 import org.jetbrains.kotlin.utils.PathUtil
-
 import org.slf4j.Logger
-
 import java.io.File
 
 
@@ -83,36 +57,12 @@ fun compileKotlinScriptToDirectory(
                 addScriptDefinition(scriptDef)
             }
             val environment = kotlinCoreEnvironmentFor(configuration, rootDisposable).apply {
-                StorageComponentContainerContributor.registerExtension(project, SamWithReceiverPlugin.contributor)
+                StorageComponentContainerContributor.registerExtension(
+                    project,
+                    CliSamWithReceiverComponentContributor(listOf(api.ParameterExtension::class.qualifiedName!!)))
             }
             return compileScript(environment, classLoader)
-                    ?: throw IllegalStateException("Internal error: unable to compile script, see log for details")
-        }
-    }
-}
-
-
-private
-object SamWithReceiverPlugin {
-
-    val contributor =
-        SamWithReceiverComponentContributor(listOf(ParameterExtension::class.qualifiedName!!))
-
-    private
-    class SamWithReceiverComponentContributor(val annotations: List<String>) : StorageComponentContainerContributor {
-        override fun onContainerComposed(container: ComponentProvider, moduleInfo: ModuleInfo?) {
-            println("onContainerComposed($container, $moduleInfo)")
-            container.get<SamWithReceiverResolver>().registerExtension(SamWithReceiverResolverExtension(annotations))
-        }
-    }
-
-    private
-    class SamWithReceiverResolverExtension(val annotations: List<String>) : SamWithReceiverResolver.Extension, AnnotationBasedExtension {
-        override fun getAnnotationFqNames(modifierListOwner: KtModifierListOwner?) = annotations
-
-        override fun shouldConvertFirstSamParameterToReceiver(function: FunctionDescriptor): Boolean {
-            println("shouldConvertFirstSamParameterToReceiver($function)")
-            return (function.containingDeclaration as? ClassDescriptor)?.hasSpecialAnnotation(null) ?: false
+                ?: throw IllegalStateException("Internal error: unable to compile script, see log for details")
         }
     }
 }
@@ -136,9 +86,9 @@ inline fun <T> withMessageCollectorFor(log: Logger, action: (MessageCollector) -
         return action(messageCollector)
     } catch (ex: CompilationException) {
         messageCollector.report(
-                CompilerMessageSeverity.EXCEPTION,
-                OutputMessageUtil.renderException(ex),
-                MessageUtil.psiElementToMessageLocation(ex.element))
+            CompilerMessageSeverity.EXCEPTION,
+            OutputMessageUtil.renderException(ex),
+            MessageUtil.psiElementToMessageLocation(ex.element))
 
         throw IllegalStateException("Internal error: ${OutputMessageUtil.renderException(ex)}")
     }
@@ -154,7 +104,7 @@ private
 fun compilerConfigurationFor(messageCollector: MessageCollector, sourceFiles: Iterable<File>): CompilerConfiguration =
     CompilerConfiguration().apply {
         addKotlinSourceRoots(sourceFiles.map { it.canonicalPath })
-        addJvmClasspathRoots(PathUtil.getJdkClassesRoots())
+        addJvmClasspathRoots(PathUtil.getJdkClassesRootsFromCurrentJre())
         put<MessageCollector>(CLIConfigurationKeys.MESSAGE_COLLECTOR_KEY, messageCollector)
     }
 
@@ -179,22 +129,28 @@ fun kotlinCoreEnvironmentFor(configuration: CompilerConfiguration, rootDisposabl
 private
 fun messageCollectorFor(log: Logger): MessageCollector =
     object : MessageCollector {
-        override fun hasErrors(): Boolean = false
+        var errorCount = 0
+
+        fun onError(msg: String) {
+            errorCount += 1
+            log.error(msg)
+        }
+
+        override fun hasErrors() = errorCount > 0
 
         override fun clear() {}
 
-        override fun report(severity: CompilerMessageSeverity, message: String, location: CompilerMessageLocation) {
+        override fun report(severity: CompilerMessageSeverity, message: String, location: CompilerMessageLocation?) {
             fun msg() =
-                    if (location == CompilerMessageLocation.NO_LOCATION) message
-                    else "$message ($location)"
+                location?.let { "$message ($location)" } ?: message
 
             when (severity) {
-                in CompilerMessageSeverity.ERRORS -> log.error("Error: " + msg())
-                CompilerMessageSeverity.ERROR -> log.error(msg())
-                CompilerMessageSeverity.WARNING -> log.info("Warning: " + msg())
-                CompilerMessageSeverity.LOGGING -> log.info(msg())
-                CompilerMessageSeverity.INFO -> log.info(msg())
-                else -> {
+                in CompilerMessageSeverity.ERRORS -> onError("Error: " + msg())
+                CompilerMessageSeverity.ERROR     -> onError(msg())
+                CompilerMessageSeverity.WARNING   -> log.info("Warning: " + msg())
+                CompilerMessageSeverity.LOGGING   -> log.info(msg())
+                CompilerMessageSeverity.INFO      -> log.info(msg())
+                else                              -> {
                 }
             }
         }

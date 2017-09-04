@@ -5,47 +5,46 @@ package compiler
 import api.DefaultGradleProject
 import api.GradleProject
 
-import org.jetbrains.kotlin.com.intellij.openapi.project.Project
-import org.jetbrains.kotlin.script.KotlinScriptDefinition
-import org.jetbrains.kotlin.script.KotlinScriptExternalDependencies
+import org.jetbrains.kotlin.script.KotlinScriptDefinitionFromAnnotatedTemplate
 
 import org.slf4j.LoggerFactory
 
 import java.io.File
-
 import java.net.URLClassLoader
 
-import kotlin.reflect.KClass
+import kotlin.script.dependencies.Environment
+import kotlin.script.dependencies.ScriptContents
+import kotlin.script.experimental.dependencies.DependenciesResolver
+import kotlin.script.experimental.dependencies.ScriptDependencies
+import kotlin.script.extensions.SamWithReceiverAnnotations
+import kotlin.script.templates.ScriptTemplateDefinition
 
 
+@SamWithReceiverAnnotations("api.ParameterExtension")
+@ScriptTemplateDefinition(resolver = Resolver::class, scriptFilePattern = """.+\.gradle\.kts""")
 abstract class BuildScript(project: GradleProject) : GradleProject by project
 
 
 fun main(vararg args: String) {
 
-   val buildscript = """
+    val buildscript = """
          println(copySpec {
             from("src")
             into("build")
          })
     """
 
-    val classLoader = BuildScript::class.java.classLoader
-    val classPath = (classLoader as URLClassLoader).urLs.map { File(it.toURI()) }.filter {
-        it.isDirectory
-            || it.name == "api-1.0.jar"
-            || isKotlinJar(it.name)
-    }
     val outputDirectory = File("output/classes")
     val scriptFile = File("output/build.gradle.kts").apply {
         parentFile.mkdirs()
         writeText(buildscript)
     }
 
+    val classLoader = BuildScript::class.java.classLoader
     val scriptClass = compileKotlinScriptToDirectory(
         outputDirectory,
         scriptFile,
-        scriptDefinitionFromTemplate(BuildScript::class, classPath),
+        KotlinScriptDefinitionFromAnnotatedTemplate(BuildScript::class),
         classLoader,
         LoggerFactory.getLogger("main"))
 
@@ -53,27 +52,23 @@ fun main(vararg args: String) {
 }
 
 
-private
-fun scriptDefinitionFromTemplate(template: KClass<out Any>, classPath: List<File>) =
-    object : KotlinScriptDefinition(template) {
+class Resolver : DependenciesResolver {
 
-        override fun <TF : Any> getDependenciesFor(
-            file: TF,
-            project: Project,
-            previousDependencies: KotlinScriptExternalDependencies?): KotlinScriptExternalDependencies? =
+    override fun resolve(scriptContents: ScriptContents, environment: Environment): DependenciesResolver.ResolveResult =
+        DependenciesResolver.ResolveResult.Success(
+            ScriptDependencies(classpath = classPath, imports = listOf("api.*", "compiler.*")))
 
-            object : KotlinScriptExternalDependencies {
-                override val imports: Iterable<String>
-                    get() = listOf("api.*", "compiler.*")
-                override val classpath: Iterable<File>
-                    get() = classPath
-            }
-    }
+    private
+    val classPath: List<File>
+        get() = (javaClass.classLoader as URLClassLoader).urLs.map { File(it.toURI()) }.filter {
+            it.isDirectory
+                || it.name == "api-1.0.jar"
+                || isKotlinJar(it.name)
+        }
 
-
-fun isKotlinJar(name: String): Boolean =
-    name.startsWith("kotlin-stdlib-")
-        || name.startsWith("kotlin-reflect-")
-        || name.startsWith("kotlin-runtime-")
+    private
+    fun isKotlinJar(name: String): Boolean =
+        name.startsWith("kotlin-stdlib-") || name.startsWith("kotlin-reflect-")
+}
 
 
