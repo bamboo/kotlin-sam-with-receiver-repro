@@ -2,6 +2,7 @@
 
 package compiler
 
+import api.Action
 import api.DefaultGradleProject
 import api.GradleProject
 
@@ -22,13 +23,21 @@ import kotlin.script.templates.ScriptTemplateDefinition
 
 @SamWithReceiverAnnotations("api.ParameterExtension")
 @ScriptTemplateDefinition(resolver = Resolver::class, scriptFilePattern = """.+\.gradle\.kts""")
-abstract class BuildScript(project: GradleProject) : GradleProject by project
+abstract class BuildScript(project: GradleProject) : GradleProject by project {
+
+    fun kotlinCopySpec(spec: Action<GradleProject.CopySpec>) = copySpec(spec)
+}
 
 
 fun main(vararg args: String) {
 
     val buildscript = """
-         println(copySpec {
+         println(copySpec { // works for API defined in Java
+            from("src")
+            into("build")
+         })
+
+         println(kotlinCopySpec { // does NOT work for API defined in Kotlin
             from("src")
             into("build")
          })
